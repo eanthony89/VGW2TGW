@@ -1,0 +1,482 @@
+{
+  "AWSTemplateFormatVersion" : "2010-09-09",
+
+  "Description" : "Transit Gateway: Migration from Transit VPC to Transit gateway",
+
+  "Parameters" : {
+    "Name" : {
+      "Description" : "ARN of the transit VPC stack",
+      "Type" : "String",
+      "Default" : "TGW"
+    },
+    "Name" : {
+      "Description" : "Name of the transit gateway",
+      "Type" : "String",
+      "Default" : "TGW"
+    },
+    "SpokeTag" : {
+      "Description" : "Tag to use to identify spoke VPCs to connect to Transit Gateway.",
+      "Type" : "String",
+      "Default" : "transitvpc:spoke"
+    },
+    "SpokeTagValue" : {
+      "Description" : "Tag value to use to identify spoke VPCs to connect to Transit Gateway.",
+      "Type" : "String",
+      "Default" : "enable",
+      "AllowedValues" : ["enable", "disable"]
+    },
+    "BgpAsn" : {
+      "Description" : "AWS side BGP ASN to use for Transit GATEWAY.",
+      "Type" : "String",
+      "Default" : "64512",
+      "MinVAlue":
+      "MaxVAlue":
+      "ConstraintDescription":
+    },
+    "DNS support" : {
+      "Description" : "Enable Domain Name System resolution for VPCs attached to this Transit Gateway.",
+      "Type" : "String",
+      "Default" : "enable",
+      "AllowedValues" : ["enable", "disable"]
+    },
+    "VPN ECMP support" : {
+      "Description" : "Automatically associate Transit Gateway attachments with this Transit Gateway's default route table.",
+      "Type" : "String",
+      "Default" : "enable",
+      "AllowedValues" : ["enable", "disable"]
+    },
+    "Default route table association" : {
+      "Description" : "Automatically associate Transit Gateway attachments with this Transit Gateway's default route table.",
+      "Type" : "String",
+      "Default" : "enable",
+      "AllowedValues" : ["enable", "disable"]
+    },
+    "Default route table propagation" : {
+      "Description" : "Automatically propagate Transit Gateway attachments with this Transit Gateway's default route table.",
+      "Type" : "String",
+      "Default" : "enable",
+      "AllowedValues" : ["enable", "disable"]
+    },
+    "Auto accept shared attachments" : {
+      "Description" : "Automatically accept cross account attachments that are attached to this Transit Gateway.",
+      "Type" : "String",
+      "Default" : "enable",
+      "AllowedValues" : ["enable", "disable"]
+    }
+  },
+  "Conditions" : {
+    "DNS support" : {"Fn::Equals" : [{"Ref" : "DNS support"}, "Yes"]},
+    "VPN ECMP support" : {"Fn::Equals" : [{"Ref" : "VPN ECMP support"}, "Yes"]},
+    "Default route table association" : {"Fn::Equals" : [{"Ref" : "Default route table association"}, "Yes"]},
+    "Auto accept shared attachments" : {"Fn::Equals" : [{"Ref" : "Auto accept shared attachments"}, "Yes"]},
+    "Default route table propagation" : {"Fn::Equals" : [{"Ref" : "Default route table propagation"}, "Yes"]},
+  },
+  "Metadata" : {
+    "AWS::CloudFormation::Interface" : {
+     "ParameterGroups" : [
+      {
+        "Label" : { "default":"TGW Configuration" },
+        "Parameters" : [ "CSRType", "KeyName", "LicenseModel", "TerminationProtection" ]
+      }
+     ],
+     "ParameterLabels" : {
+      "BgpAsn" : { "default" : "AWS side BGP ASN to use for Transit GATEWAY." },
+      "SpokeTag" : { "default" : "Spoke VPC Tag Name" },
+      "VPN ECMP support" : { "default" : "Spoke VPC Tag Value" },
+      "Default route table association" : { "default" : "Spoke VPC Tag Name" },
+      "Default route table propagation" : { "default" : "Spoke VPC Tag Name" },
+      "Auto accept shared attachments" : { "default" : "Spoke VPC Tag Name" },
+      "DNS support" : { "default" : "Spoke VPC Tag Name" }
+     }
+    }
+  },
+  "Mappings" : {
+    "Function" : {
+      "Configurator" : {
+        "S3Bucket" : "solutions",
+	      "S3Key" : "transit-vpc/latest/transit-vpc-push-cisco-config.zip",
+        "Name" : "cisco-configurator",
+        "Handler": "transit_vpc_push_cisco_config/lambda_function.lambda_handler",
+        "Description": "Transit VPC: This function is invoked when a generic VPN configuration is placed in an S3 bucket - it converts the generic information into Cisco IOS specific commands and pushes the config to transit VPC routers.",
+        "Runtime": "python2.7",
+        "Timeout": "300",
+        "MemorySize": "128"
+      }
+      },
+    }
+  },
+  "Resources" : {
+   "CreateRsaKey": {
+     "Type": "Custom::LoadLambda",
+     "Properties": {
+       "ServiceToken": { "Fn::GetAtt" : ["SolutionHelper", "Arn"] },
+       "Region": { "Ref": "AWS::Region" },
+       "CreateSshKey" : { "Fn::Join": ["", [
+		"{ 'Bucket' : '",{ "Ref" : "VPNConfigS3Bucket" },"', ",
+		"'SSEKMSKeyId' : 'arn:aws:kms:",{"Ref" : "AWS::Region"},":",{ "Ref" : "AWS::AccountId" }, ":key/", { "Ref" : "KMSKey" }, "', ",
+		"'PrivateKey' : '", { "Ref" : "S3Prefix" }, { "Fn::FindInMap" : [ "Function", "Csr", "PrivateKey"]}, "', ",
+		"'PublicKey' : '", { "Ref" : "S3Prefix" }, { "Fn::FindInMap" : [ "Function", "Csr", "PublicKey"]}, "' ",
+		"}"
+	]] }
+     }
+   },
+   "CreateRandomPassword": {
+     "Type": "Custom::LoadLambda",
+     "Properties": {
+       "ServiceToken": { "Fn::GetAtt" : ["SolutionHelper", "Arn"] },
+       "Region": { "Ref": "AWS::Region" },
+       "CreateRandomPassword" : { "Fn::FindInMap" : [ "Function", "Csr", "PasswordLength"]},
+       "RandomPasswordSpecialCharacters": "False"
+     }
+   },
+   "CiscoConfigFunctionRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version" : "2012-10-17",
+          "Statement": [ {
+            "Effect": "Allow",
+            "Principal": {
+              "Service": "lambda.amazonaws.com"
+            },
+            "Action": "sts:AssumeRole"
+          } ]
+        },
+        "Path": "/"
+      }
+   },
+    "CiscoConfigFunctionRolePolicy" : {
+      "Type": "AWS::IAM::Policy",
+      "Properties": {
+	  "Roles" : [ { "Ref" : "CiscoConfigFunctionRole" } ],
+          "PolicyName": "Cisco_Config_Permissions",
+          "PolicyDocument": {
+            "Version" : "2012-10-17",
+	    "Statement": [
+		{
+		  "Effect": "Allow",
+		  "Action": [
+		    "logs:CreateLogGroup",
+		    "logs:CreateLogStream",
+		    "logs:PutLogEvents"
+		  ],
+		  "Resource": { "Fn::Join" : ["", ["arn:aws:logs:",{"Ref" : "AWS::Region"},":",{ "Ref" : "AWS::AccountId" }, ":log-group:/aws/lambda/*" ]]}
+		},
+		{
+		  "Effect": "Allow",
+		  "Action": [
+                    "ec2:CreateNetworkInterface",
+        	    "ec2:DescribeNetworkInterfaces",
+        	    "ec2:DetachNetworkInterface",
+        	    "ec2:DeleteNetworkInterface"
+		  ],
+		  "Resource": "*"
+		},
+		{
+		  "Effect": "Allow",
+		  "Action": [
+                    "s3:PutObject",
+                    "s3:GetObject"
+		  ],
+		  "Resource": { "Fn::Join": ["", ["arn:aws:s3:::", { "Ref" : "VPNConfigS3Bucket" }, "/", {"Ref": "S3Prefix"}, "*" ]] }
+		}
+	     ]
+        }
+      }
+   },
+   "CiscoConfigFunction": {
+     "DependsOn": [
+       "CiscoConfigFunctionRolePolicy"
+     ],
+     "Type": "AWS::Lambda::Function",
+     "Properties": {
+       "FunctionName" : { "Fn::Join": ["-", [ { "Ref" : "AWS::StackName" }, { "Fn::FindInMap" : [ "Function", "Configurator", "Name"]}	]] },
+       "Code": {
+         "S3Bucket": { "Fn::Join": ["", [ { "Fn::FindInMap" : [ "Function", "Configurator", "S3Bucket"]}, "-", {"Ref": "AWS::Region"} ]] },
+         "S3Key": { "Fn::FindInMap" : [ "Function", "Configurator", "S3Key"]}
+       },
+       "MemorySize": { "Fn::FindInMap" : [ "Function", "Configurator", "MemorySize"]},
+       "Handler": { "Fn::FindInMap" : [ "Function", "Configurator", "Handler"]},
+       "Role": {"Fn::GetAtt": ["CiscoConfigFunctionRole", "Arn"]},
+       "Timeout": { "Fn::FindInMap" : [ "Function", "Configurator", "Timeout"]},
+       "Runtime": { "Fn::FindInMap" : [ "Function", "Configurator", "Runtime"]},
+       "Description": { "Fn::FindInMap" : [ "Function", "Configurator", "Description"]},
+       "VpcConfig" : {
+         "SecurityGroupIds" : [ { "Ref" : "CiscoConfigSecurityGroup" } ],
+         "SubnetIds" : [ { "Ref" : "VPCPubSub1" }, { "Ref" : "VPCPubSub2" } ]
+       },
+       "Environment": {
+         "Variables": {
+           "CONFIG_FILE": "transit_vpc_config.txt",
+           "LOG_LEVEL":"INFO"
+         }
+       }
+     }
+   },
+   "CiscoConfigS3Event": {
+     "Type": "Custom::LoadLambda",
+     "Properties": {
+       "ServiceToken": { "Fn::GetAtt" : ["SolutionHelper", "Arn"] },
+       "FunctionName": { "Fn::Join": ["-", [ { "Ref" : "AWS::StackName" }, { "Fn::FindInMap" : [ "Function", "Configurator", "Name"]}	]] },
+       "LambdaArn": { "Fn::GetAtt" : ["CiscoConfigFunction", "Arn"] },
+       "S3Event" : { "Fn::Join": ["", [
+         "{ 'Bucket' : '",{ "Ref" : "VPNConfigS3Bucket" },"', ",
+         "'EventPattern' : {",
+           "'LambdaFunctionConfigurations' : [ {",
+             "'LambdaFunctionArn': '", { "Fn::GetAtt" : ["CiscoConfigFunction", "Arn"] }, "',",
+             "'Events': ['s3:ObjectCreated:Put' ],",
+             "'Filter': {",
+               "'Key': {",
+                 "'FilterRules': [ {",
+                   "'Name': 'prefix',",
+                   "'Value': '",{ "Ref" : "S3Prefix" },"'",
+                 "}, {",
+                   "'Name': 'suffix',",
+                   "'Value': '.conf'",
+                 "} ] } }",
+               "} ] }",
+		     "}"
+       ]] }
+     }
+   },
+   "TransitVpcS3Config": {
+     "Type": "Custom::LoadLambda",
+     "Properties": {
+       "ServiceToken": { "Fn::GetAtt" : ["SolutionHelper", "Arn"] },
+       "StoreInS3KMS" : { "Fn::Join": ["", [
+         "[{ 'Bucket' : '",{ "Ref" : "VPNConfigS3Bucket" },"', ",
+         "'Key' : '", { "Ref" : "S3Prefix" }, "transit_vpc_config.txt', ",
+         "'SSEKMSKeyId' : 'arn:aws:kms:",{"Ref" : "AWS::Region"},":",{ "Ref" : "AWS::AccountId" }, ":key/", { "Ref" : "KMSKey" }, "', ",
+         "'Body': \"{",
+           "'UUID':'",{"Fn::GetAtt": [ "CreateUniqueID", "UUID" ] },"',",
+           "'SENDDATA':'",{ "Fn::FindInMap" : [ "Send", "AnonymousUsage", "Data"]},"',",
+           "'EIP1':'",{ "Ref" : "CsrEip1" },"',",
+           "'EIP2':'",{ "Ref" : "CsrEip2" },"',",
+           "'PIP1':'",{ "Fn::GetAtt" : [ "VpcCsr1", "PrivateIp" ] },"',",
+           "'PIP2':'",{ "Fn::GetAtt" : [ "VpcCsr2", "PrivateIp" ] },"',",
+           "'BGP_ASN':",{ "Ref" : "BgpAsn" },",",
+           "'PREFERRED_PATH_TAG':'",{ "Ref" : "PreferredPathTag" },"',",
+           "'HUB_TAG':'",{ "Ref" : "SpokeTag" },"',",
+           "'HUB_TAG_VALUE':'",{ "Ref" : "SpokeTagValue" },"',",
+           "'USER_NAME':'",{ "Fn::FindInMap" : [ "Function", "Csr", "UserName"]},"',",
+           "'PRIVATE_KEY':'",{ "Fn::FindInMap" : [ "Function", "Csr", "PrivateKey"]},"',",
+           "'PUBLIC_KEY':'",{ "Fn::GetAtt" : [ "CreateRsaKey", "PubKey" ] },"',",
+           "'PASSWORD':'",{ "Fn::GetAtt" : [ "CreateRandomPassword" , "Password" ] },"',",
+           "'KMS_KEY':'arn:aws:kms:",{"Ref" : "AWS::Region"},":",{ "Ref" : "AWS::AccountId" }, ":key/", { "Ref" : "KMSKey" },"'",
+		     "}\"",
+       "}]"
+     ]] }
+    }
+   },
+   "TransitVpcPollerRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version" : "2012-10-17",
+          "Statement": [ {
+            "Effect": "Allow",
+            "Principal": {
+              "Service": "lambda.amazonaws.com"
+            },
+            "Action": "sts:AssumeRole"
+          } ]
+        },
+        "Path": "/"
+      }
+    },
+    "TransitVpcPollerRolePolicy" : {
+      "Type": "AWS::IAM::Policy",
+      "Properties": {
+	  "Roles" : [ { "Ref" : "TransitVpcPollerRole" } ],
+          "PolicyName": "Transit_VPC_Poller_Function_Permissions",
+          "PolicyDocument": {
+              "Version" : "2012-10-17",
+	      "Statement": [
+		{
+		  "Effect": "Allow",
+		  "Action": [
+		    "logs:CreateLogGroup",
+		    "logs:CreateLogStream",
+		    "logs:PutLogEvents"
+		  ],
+		  "Resource": { "Fn::Join" : ["", ["arn:aws:logs:",{"Ref" : "AWS::Region"},":",{ "Ref" : "AWS::AccountId" }, ":log-group:/aws/lambda/*" ]]}
+		},
+		{
+		  "Effect": "Allow",
+		  "Action": [
+                    "ec2:DescribeRegions",
+                    "ec2:DescribeVpnGateways",
+                    "ec2:DescribeVpnConnections",
+                    "ec2:CreateTags",
+                    "ec2:CreateCustomerGateway",
+                    "ec2:DeleteCustomerGateway",
+                    "ec2:CreateVpnConnection",
+                    "ec2:DeleteVpnConnection"
+		  ],
+		  "Resource": "*"
+		},
+		{
+		  "Effect": "Allow",
+		  "Action": [
+                    "s3:PutObject",
+                    "s3:PutObjectAcl",
+                    "s3:GetObject"
+		  ],
+
+		  "Resource": { "Fn::Join": ["", ["arn:aws:s3:::", { "Ref" : "VPNConfigS3Bucket" }, "/", {"Ref": "S3Prefix"}, "*" 	]] }
+		},
+    {
+    "Effect": "Allow",
+    "Action": [
+      "kms:Encrypt",
+      "kms:Decrypt"
+    ],
+    "Resource": "*"
+
+  }
+	     ]
+        }
+      }
+    },
+    "PollerFunction": {
+      "DependsOn": [
+        "TransitVpcPollerRolePolicy",
+        "CiscoConfigFunction",
+        "TransitVpcS3Config"
+      ],
+      "Type": "AWS::Lambda::Function",
+      "Properties": {
+        "FunctionName" : { "Fn::Join": ["-", [ { "Ref" : "AWS::StackName" }, { "Fn::FindInMap" : [ "Function", "Poller", "Name"]}	]] },
+        "Code": {
+          "S3Bucket": { "Fn::Join": ["", [ { "Fn::FindInMap" : [ "Function", "Poller", "S3Bucket"]}, "-", {"Ref": "AWS::Region"} ]] },
+          "S3Key": { "Fn::FindInMap" : [ "Function", "Poller", "S3Key"]}
+        },
+        "MemorySize": { "Fn::FindInMap" : [ "Function", "Poller", "MemorySize"]},
+        "Handler": { "Fn::FindInMap" : [ "Function", "Poller", "Handler"]},
+        "Role": {"Fn::GetAtt": ["TransitVpcPollerRole", "Arn"]},
+        "Timeout": { "Fn::FindInMap" : [ "Function", "Poller", "Timeout"]},
+        "Runtime": { "Fn::FindInMap" : [ "Function", "Poller", "Runtime"]},
+        "Description": { "Fn::FindInMap" : [ "Function", "Poller", "Description"]},
+        "Environment": {
+          "Variables": {
+            "BUCKET_NAME": { "Ref" : "VPNConfigS3Bucket" },
+            "BUCKET_PREFIX": { "Ref" : "S3Prefix" },
+            "CONFIG_FILE": "transit_vpc_config.txt",
+            "LOG_LEVEL":"INFO"
+          }
+        }
+      }
+    },
+    "PollerEvent": {
+      "Type": "AWS::Events::Rule",
+      "Properties": {
+        "Description": "Transit VPC: Rule to trigger VGW-Poller every minute to find VGWs that need to be attached to the transit VPC.",
+        "ScheduleExpression": "cron(* * * * ? *)",
+        "State": "ENABLED",
+        "Targets": [ {
+          "Id": { "Fn::Join": ["-", [ { "Ref" : "AWS::StackName" },"VGW-Poller-1min" ]] },
+          "Arn": { "Fn::GetAtt": [ "PollerFunction", "Arn" ] }
+        } ]
+      }
+    },
+    "PermissionForPollerEvent": {
+      "Type": "AWS::Lambda::Permission",
+      "Properties": {
+        "FunctionName": { "Ref": "PollerFunction" },
+        "Action": "lambda:InvokeFunction",
+        "Principal": "events.amazonaws.com",
+        "SourceArn": { "Fn::GetAtt": ["PollerEvent", "Arn"] }
+      }
+    },
+    "CSRSecurityGroup" : {
+      "Type" : "AWS::EC2::SecurityGroup",
+      "Properties" : {
+        "GroupDescription" : "CSR Security Group Rules",
+        "VpcId" : { "Ref" : "TransitVPC" },
+        "SecurityGroupIngress" : [
+           { "IpProtocol" : "tcp", "FromPort" : "22",  "ToPort" : "22",  "SourceSecurityGroupId" : { "Ref" : "CiscoConfigSecurityGroup" }}
+	],
+        "SecurityGroupEgress" : [
+           { "IpProtocol" : "-1", "FromPort" : "0", "ToPort" : "65535", "CidrIp" : "0.0.0.0/0" } ]
+      }
+    },
+    "CiscoConfigSecurityGroup" : {
+      "Type" : "AWS::EC2::SecurityGroup",
+      "Properties" : {
+        "GroupDescription" : "Transit VPC Automation Security Group Rules",
+        "VpcId" : { "Ref" : "TransitVPC" },
+        "SecurityGroupEgress" : [{ "IpProtocol" : "tcp", "FromPort" : "443", "ToPort" : "443", "CidrIp" : "0.0.0.0/0" }]
+      }
+    },
+    "SSHtoCSR": {
+      "Type": "AWS::EC2::SecurityGroupEgress",
+      "Properties":{
+        "IpProtocol": "tcp",
+        "FromPort": "22",
+        "ToPort": "22",
+        "DestinationSecurityGroupId": {
+          "Fn::GetAtt": [
+            "CSRSecurityGroup",
+            "GroupId"
+          ]
+        },
+        "GroupId": {
+          "Fn::GetAtt": [
+            "CiscoConfigSecurityGroup",
+            "GroupId"
+          ]
+        }
+      }
+    },
+
+    "CreateUniqueID": {
+         "Type": "Custom::LoadLambda",
+         "Properties": {
+             "ServiceToken": { "Fn::GetAtt": ["SolutionHelper", "Arn"] },
+             "Region": { "Ref": "AWS::Region" },
+             "CreateUniqueID": "true"
+         }
+    },
+    "SendingData": {
+        "Type": "Custom::LoadLambda",
+        "Properties": {
+            "ServiceToken": { "Fn::GetAtt": ["SolutionHelper", "Arn"] },
+            "SendAnonymousData": { "Fn::Join": ["", [
+                "{ 'Solution' : '", "SO0001", "', ",
+                  "'UUID' : '", {"Fn::GetAtt": ["CreateUniqueID", "UUID"]}, "', ",
+                  "'Data': {", "'CSRType': '", {"Ref": "CSRType"}, "',",
+                               "'LicenseModel': '", {"Ref": "LicenseModel"}, "',",
+                               "'TerminationProtection': '", {"Ref": "TerminationProtection"}, "',",
+                               "'CreateVPC': 'Yes',",
+                               "'SendAnonymousData': '", { "Fn::FindInMap" : [ "Send", "AnonymousUsage", "Data"]}, "'",
+                          "}",
+                "}"
+              ]]
+            }
+        }
+    }
+  },
+  "Outputs" : {
+    "CSR1" : {
+      "Description" : "IP Address for CSR1",
+      "Value" : { "Fn::GetAtt" : [ "VpcCsr1", "PublicIp" ] }
+    },
+    "CSR2" : {
+      "Description" : "IP Address for CSR2",
+      "Value" : { "Fn::GetAtt" : [ "VpcCsr2", "PublicIp" ] }
+    },
+    "ConfigS3Bucket" : {
+      "Description" : "S3 bucket for storing VPN configuration information.",
+      "Value" : { "Ref" : "VPNConfigS3Bucket" }
+    },
+    "BucketPrefix" : {
+      "Description" : "S3 prefix for storing VPN configuration information.",
+      "Value" : { "Ref" : "S3Prefix" }
+    },
+    "SpokeVPCTag" : {
+      "Description" : "Tag used to identify spoke VPCs.",
+      "Value" : { "Ref": "SpokeTag" }
+    }
+
+  }
+}
